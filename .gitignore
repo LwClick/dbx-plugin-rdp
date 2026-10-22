@@ -1,0 +1,9 @@
+/dist/
+/ui/
+/node_modules/
+/backend/target/
+/.dbx-dev/
+.dbx-repository-signing-key.env
+.DS_Store
+*.log
+/vendor/dbx-plugin-sdk/

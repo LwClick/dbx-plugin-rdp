@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="RDP connection">
+  <rect x="4" y="10" width="56" height="36" rx="4" fill="#1f2937"/>
+  <rect x="8" y="14" width="48" height="28" rx="2" fill="#6d5dfc"/>
+  <path fill="#e5e7eb" d="M8 42h48v4H8z"/>
+  <path fill="#1f2937" d="M26 50h12l2 6H24z"/>
+  <path fill="#fff" d="M20 21h12a6 6 0 0 1 0 12h-5v5h-7V21Zm7 6v2h5a1 1 0 1 0 0-2h-5Z"/>
+</svg>

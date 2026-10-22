@@ -1,0 +1,196 @@
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/plugin-sdk-v1/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.github.lwclick.rdp",
+  "name": "DBX RDP",
+  "version": "0.1.0",
+  "publisher": "lwclick",
+  "description": "Remote Windows desktops over RDP inside DBX.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/LwClick/dbx-plugin-rdp",
+  "engines": {
+    "dbx": ">=0.6.51",
+    "host_api": "^1.0"
+  },
+  "permissions": ["host.binary", "host.events", "host.clipboard:read", "host.storage"],
+  "entrypoints": {
+    "backend": {
+      "protocol_versions": [1],
+      "transport": "stdio-framed",
+      "executable": "bin/dbx-rdp-sidecar"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "connection-provider",
+      "id": "io.github.lwclick.rdp.connection",
+      "label": "RDP connection",
+      "icon": "assets/connection.svg",
+      "database_type": "rdp",
+      "description": "Connect to a Windows Remote Desktop server.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "default": "Windows RDP",
+          "binding": "name",
+          "required": true
+        },
+        {
+          "key": "host",
+          "label": "Host",
+          "type": "text",
+          "placeholder": "192.168.1.10 or win.example.com",
+          "binding": "host",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "default": 3389,
+          "binding": "port",
+          "required": true
+        },
+        {
+          "key": "username",
+          "label": "Username",
+          "type": "text",
+          "placeholder": "DOMAIN\\user or user@domain",
+          "binding": "username",
+          "required": true
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "binding": "secret",
+          "description": "Stored by DBX Secret Store. Leave empty to be prompted on every connect."
+        },
+        {
+          "key": "domain",
+          "label": "Domain",
+          "type": "text",
+          "binding": "config",
+          "description": "Optional NetBIOS domain when the username does not include it."
+        },
+        {
+          "key": "ask_password",
+          "label": "Always ask for password",
+          "type": "boolean",
+          "default": false,
+          "binding": "config",
+          "description": "Ignore the saved password and prompt on each connect."
+        },
+        {
+          "key": "security_mode",
+          "label": "Security mode",
+          "type": "select",
+          "default": "nla",
+          "binding": "config",
+          "options": [
+            { "label": "NLA (recommended)", "value": "nla" },
+            { "label": "TLS (legacy servers)", "value": "tls" }
+          ]
+        },
+        {
+          "key": "certificate_policy",
+          "label": "Server certificate",
+          "type": "select",
+          "default": "prompt",
+          "binding": "config",
+          "options": [
+            { "label": "Prompt and pin untrusted certificate", "value": "prompt" },
+            { "label": "Strict (trusted roots only)", "value": "strict" }
+          ]
+        },
+        {
+          "key": "clipboard_sync",
+          "label": "Text clipboard sync",
+          "type": "boolean",
+          "default": true,
+          "binding": "config"
+        },
+        {
+          "key": "performance_profile",
+          "label": "Performance profile",
+          "type": "select",
+          "default": "balanced",
+          "binding": "config",
+          "options": [
+            { "label": "Balanced", "value": "balanced" },
+            { "label": "Quality", "value": "quality" },
+            { "label": "Speed", "value": "speed" }
+          ]
+        },
+        {
+          "key": "connect_timeout_secs",
+          "label": "Connect timeout (seconds)",
+          "type": "number",
+          "default": 20,
+          "binding": "config"
+        }
+      ],
+      "workbench": "io.github.lwclick.rdp.workbench",
+      "capabilities": ["test", "connect", "disconnect"],
+      "actions": [
+        {
+          "id": "reset-certificate-pin",
+          "label": "Reset certificate trust",
+          "description": "Forget the pinned server certificate for this host so the next connect asks again.",
+          "variant": "secondary",
+          "when": "always",
+          "requires_valid_form": false
+        }
+      ]
+    },
+    {
+      "type": "workbench",
+      "id": "io.github.lwclick.rdp.workbench",
+      "label": "RDP Desktop",
+      "description": "Sandboxed remote desktop canvas for an RDP connection.",
+      "icon": "assets/plugin.svg"
+    }
+  ],
+  "localizations": {
+    "zh-CN": {
+      "name": "DBX RDP",
+      "description": "在 DBX 中通过 RDP 远程连接 Windows 桌面。",
+      "contributions": {
+        "io.github.lwclick.rdp.connection": {
+          "label": "RDP 连接",
+          "description": "连接 Windows 远程桌面服务器。",
+          "fields": {
+            "display_name": { "label": "连接名称" },
+            "host": { "label": "主机" },
+            "port": { "label": "端口" },
+            "username": { "label": "用户名", "placeholder": "DOMAIN\\user 或 user@domain" },
+            "password": { "label": "密码", "description": "由 DBX Secret Store 加密保存；留空则每次连接时询问。" },
+            "domain": { "label": "域", "description": "用户名未包含域时可填写 NetBIOS 域。" },
+            "ask_password": { "label": "每次连接都询问密码", "description": "忽略已保存密码，每次连接重新输入。" },
+            "security_mode": { "label": "安全模式", "options": { "nla": "NLA（推荐）", "tls": "TLS（旧服务器）" } },
+            "certificate_policy": { "label": "服务器证书", "options": { "prompt": "提示并固定不受信任证书", "strict": "严格（仅信任系统根证书）" } },
+            "clipboard_sync": { "label": "文本剪贴板同步" },
+            "performance_profile": { "label": "性能模式", "options": { "balanced": "平衡", "quality": "质量", "speed": "速度" } },
+            "connect_timeout_secs": { "label": "连接超时（秒）" }
+          },
+          "actions": {
+            "reset-certificate-pin": {
+              "label": "重置证书信任",
+              "description": "忘记此主机已固定的服务器证书，下次连接时重新确认。"
+            }
+          }
+        },
+        "io.github.lwclick.rdp.workbench": {
+          "label": "RDP 桌面",
+          "description": "RDP 连接的沙箱远程桌面画布。"
+        }
+      }
+    }
+  }
+}

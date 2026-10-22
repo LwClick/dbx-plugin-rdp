@@ -1,0 +1,2 @@
+[patch.crates-io]
+dbx-plugin-sdk = { path = "vendor/sdk-root/plugins/sdk/rust/dbx-plugin-sdk" }

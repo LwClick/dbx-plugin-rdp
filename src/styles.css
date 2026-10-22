@@ -1,0 +1,284 @@
+:root {
+  color-scheme: light dark;
+  --rdp-background: var(--color-background, #111214);
+  --rdp-foreground: var(--color-foreground, #ededed);
+  --rdp-panel: var(--color-card, #17181b);
+  --rdp-muted: var(--color-muted-foreground, #a1a1aa);
+  --rdp-border: var(--color-border, #2a2b30);
+  --rdp-accent: var(--color-primary, #6d5dfc);
+  --rdp-accent-foreground: var(--color-primary-foreground, #ffffff);
+  --rdp-danger: var(--color-destructive, #ef4444);
+  --rdp-warning: var(--color-warning, #f59e0b);
+  --rdp-success: var(--color-success, #22c55e);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--rdp-background);
+  color: var(--rdp-foreground);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+}
+
+.rdp-app {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--rdp-background);
+  color: var(--rdp-foreground);
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 42px;
+  padding: 0 10px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rdp-border);
+  background: color-mix(in srgb, var(--rdp-background) 90%, var(--rdp-panel));
+}
+
+.toolbar__identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toolbar__title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar__subtitle {
+  overflow: hidden;
+  color: var(--rdp-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar__actions::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar button {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rdp-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.toolbar button:hover {
+  background: var(--color-muted, #26272c);
+}
+
+.toolbar button.button--active {
+  border-color: color-mix(in srgb, var(--rdp-accent) 60%, var(--rdp-border));
+  background: color-mix(in srgb, var(--rdp-accent) 18%, transparent);
+}
+
+.toolbar button.button--primary,
+.overlay__card button.button--primary {
+  border-color: var(--rdp-accent);
+  background: var(--rdp-accent);
+  color: var(--rdp-accent-foreground);
+}
+
+.toolbar button.button--primary:hover,
+.overlay__card button.button--primary:hover {
+  filter: brightness(1.08);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--rdp-muted);
+}
+
+.status-dot--ok {
+  background: var(--rdp-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rdp-success) 20%, transparent);
+}
+
+.status-dot--busy {
+  background: var(--rdp-warning);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.status-dot--error {
+  background: var(--rdp-danger);
+}
+
+.content {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.canvas-host {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  background: #000;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 65%, transparent);
+}
+
+.overlay--soft {
+  background: color-mix(in srgb, #000 40%, transparent);
+}
+
+.overlay__card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 460px;
+  padding: 20px 22px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 10px;
+  background: var(--rdp-panel);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.overlay__card--compact {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.overlay__card h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.overlay__card p {
+  margin: 0;
+  color: var(--rdp-muted);
+  line-height: 1.6;
+}
+
+.overlay__error {
+  color: var(--rdp-danger) !important;
+  overflow-wrap: anywhere;
+}
+
+.overlay__card button {
+  height: 30px;
+  margin-top: 4px;
+  padding: 0 14px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--rdp-foreground) 20%, transparent);
+  border-top-color: var(--rdp-accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.statusbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 22px;
+  padding: 0 10px;
+  border-top: 1px solid var(--rdp-border);
+  background: var(--rdp-panel);
+  color: var(--rdp-muted);
+  font-size: 11px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 38px;
+  left: 50%;
+  z-index: 20;
+  max-width: min(520px, 85vw);
+  padding: 8px 14px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 999px;
+  background: var(--rdp-panel);
+  color: var(--rdp-foreground);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  transform: translateX(-50%);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
