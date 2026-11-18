@@ -43,6 +43,23 @@ pub struct RdpConnectOptions {
     pub clipboard_sync: bool,
     pub performance_profile: PerformanceProfile,
     pub connect_timeout: Duration,
+    /// Initial RDP desktop size. In fixed mode this is also the final size.
+    pub desktop_width: u16,
+    pub desktop_height: u16,
+    /// `true` only for the "fit" mode; the workbench may then request resizes.
+    pub auto_resize: bool,
+    /// Disable RDP lossy bitmap compression.
+    pub lossless: bool,
+    /// Redirect a local directory as `\\tsclient\DBX RDP`.
+    pub share_folder: bool,
+    /// Custom shared directory; `None` uses the plugin data directory.
+    pub shared_folder: Option<String>,
+    /// Play remote audio through the sidecar's system audio output.
+    pub audio_playback: bool,
+    /// Map macOS Command shortcuts to Windows Ctrl equivalents.
+    pub remap_shortcuts: bool,
+    /// Windows keyboard layout HKL low word, when the user picked one.
+    pub keyboard_layout: Option<u32>,
 }
 
 impl RdpConnectOptions {
@@ -106,10 +123,20 @@ impl RdpConnectOptions {
             .filter(|domain| !domain.is_empty());
         let (username, domain) = split_username(&raw_username, explicit_domain);
 
+        // DBX serializes `password` as an empty string for plugin connections
+        // and puts the saved secret in `connection_secrets`. Treat empty and
+        // masked values as absent; otherwise `Some("")` would short-circuit
+        // the secret fallback and force a password prompt on every connect.
         let password = connection
             .get("password")
             .and_then(Value::as_str)
-            .or_else(|| secrets.get("password").and_then(Value::as_str))
+            .filter(|value| !is_absent_password(value))
+            .or_else(|| {
+                secrets
+                    .get("password")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
             .unwrap_or_default()
             .to_string();
 
@@ -141,6 +168,29 @@ impl RdpConnectOptions {
             .unwrap_or(20)
             .clamp(5, 120);
         let connect_timeout = Duration::from_secs(timeout_secs);
+        let (desktop_width, desktop_height, auto_resize) =
+            parse_resolution(external.get("resolution").and_then(Value::as_str));
+        let lossless = external.get("image_quality").and_then(Value::as_str) != Some("balanced");
+        let share_folder = external
+            .get("share_local_folder")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let shared_folder = external
+            .get("shared_folder_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let audio_playback = external
+            .get("audio_playback")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let remap_shortcuts = external
+            .get("remap_macos_shortcuts")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let keyboard_layout =
+            parse_keyboard_layout(external.get("keyboard_layout").and_then(Value::as_str));
 
         Ok(Self {
             connection_id,
@@ -158,6 +208,15 @@ impl RdpConnectOptions {
             clipboard_sync,
             performance_profile,
             connect_timeout,
+            desktop_width,
+            desktop_height,
+            auto_resize,
+            lossless,
+            share_folder,
+            shared_folder,
+            audio_playback,
+            remap_shortcuts,
+            keyboard_layout,
         })
     }
 
@@ -194,6 +253,40 @@ pub fn pin_key(host: &str, port: u16) -> String {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
+    }
+}
+
+fn is_absent_password(value: &str) -> bool {
+    value.is_empty() || value.starts_with("__DBX_SAVED_CREDENTIAL__:")
+}
+
+/// Maps the manifest layout id to the Windows HKL low word. `auto`/unknown
+/// values leave the server default untouched.
+fn parse_keyboard_layout(value: Option<&str>) -> Option<u32> {
+    match value {
+        Some("en-US") => Some(0x0409),
+        Some("zh-CN") => Some(0x0804),
+        Some("ja-JP") => Some(0x0411),
+        Some("de-DE") => Some(0x0407),
+        Some("fr-FR") => Some(0x040c),
+        Some("es-ES") => Some(0x0c0a),
+        Some("ru-RU") => Some(0x0419),
+        Some("pt-BR") => Some(0x0416),
+        _ => None,
+    }
+}
+
+/// Resolves the connection-level desktop size. Fixed presets keep a standard
+/// Windows layout; "fit" lets the workbench drive Display Control resizes.
+fn parse_resolution(value: Option<&str>) -> (u16, u16, bool) {
+    match value {
+        // "retina" was removed; keep saved connections dynamic instead of
+        // silently switching them to a fixed 1080p desktop.
+        Some("fit") | Some("retina") => (1280, 800, true),
+        Some("1280x720") => (1280, 720, false),
+        Some("2560x1440") => (2560, 1440, false),
+        Some("3840x2160") => (3840, 2160, false),
+        _ => (1920, 1080, false),
     }
 }
 
@@ -256,6 +349,24 @@ mod tests {
     }
 
     #[test]
+    fn reads_secret_when_password_field_is_empty() {
+        let mut value = payload();
+        value["connection"]["password"] = json!("");
+        value["connection"]["connection_secrets"] = json!({ "password": "saved-secret" });
+        let options = RdpConnectOptions::from_lifecycle(&value).unwrap();
+        assert_eq!(options.password.as_str(), "saved-secret");
+    }
+
+    #[test]
+    fn ignores_masked_saved_credential() {
+        let mut value = payload();
+        value["connection"]["password"] = json!("__DBX_SAVED_CREDENTIAL__:masked");
+        value["connection"]["connection_secrets"] = json!({ "password": "saved-secret" });
+        let options = RdpConnectOptions::from_lifecycle(&value).unwrap();
+        assert_eq!(options.password.as_str(), "saved-secret");
+    }
+
+    #[test]
     fn keeps_upn_and_plain_names() {
         assert_eq!(
             split_username("alice@acme.test", None),
@@ -265,6 +376,96 @@ mod tests {
             split_username("alice", Some("ACME")),
             ("alice".to_string(), Some("ACME".to_string()))
         );
+    }
+
+    #[test]
+    fn defaults_to_fixed_1080p() {
+        let options = RdpConnectOptions::from_lifecycle(&payload()).unwrap();
+        assert_eq!(
+            (options.desktop_width, options.desktop_height),
+            (1920, 1080)
+        );
+        assert!(!options.auto_resize);
+        assert!(options.lossless);
+    }
+
+    #[test]
+    fn parses_fit_and_fixed_resolutions() {
+        for (value, width, height, auto_resize) in [
+            ("fit", 1280, 800, true),
+            ("retina", 1280, 800, true),
+            ("1280x720", 1280, 720, false),
+            ("2560x1440", 2560, 1440, false),
+            ("3840x2160", 3840, 2160, false),
+            ("1920x1080", 1920, 1080, false),
+        ] {
+            let mut input = payload();
+            input["connection"]["external_config"]["resolution"] = json!(value);
+            let options = RdpConnectOptions::from_lifecycle(&input).unwrap();
+            assert_eq!(
+                (options.desktop_width, options.desktop_height),
+                (width, height),
+                "resolution {value}"
+            );
+            assert_eq!(options.auto_resize, auto_resize, "resolution {value}");
+        }
+    }
+
+    #[test]
+    fn parses_image_quality() {
+        let mut input = payload();
+        input["connection"]["external_config"]["image_quality"] = json!("balanced");
+        let options = RdpConnectOptions::from_lifecycle(&input).unwrap();
+        assert!(!options.lossless);
+
+        input["connection"]["external_config"]["image_quality"] = json!("lossless");
+        let options = RdpConnectOptions::from_lifecycle(&input).unwrap();
+        assert!(options.lossless);
+    }
+
+    #[test]
+    fn parses_keyboard_layout_and_shortcut_remap() {
+        let options = RdpConnectOptions::from_lifecycle(&payload()).unwrap();
+        assert!(options.remap_shortcuts);
+        assert_eq!(options.keyboard_layout, None);
+
+        for (value, expected) in [
+            ("en-US", 0x0409),
+            ("zh-CN", 0x0804),
+            ("fr-FR", 0x040c),
+            ("pt-BR", 0x0416),
+            ("auto", 0),
+            ("bogus", 0),
+        ] {
+            let mut input = payload();
+            input["connection"]["external_config"]["keyboard_layout"] = json!(value);
+            let options = RdpConnectOptions::from_lifecycle(&input).unwrap();
+            assert_eq!(
+                options.keyboard_layout.unwrap_or(0),
+                expected,
+                "layout {value}"
+            );
+        }
+
+        let mut input = payload();
+        input["connection"]["external_config"]["remap_macos_shortcuts"] = json!(false);
+        assert!(
+            !RdpConnectOptions::from_lifecycle(&input)
+                .unwrap()
+                .remap_shortcuts
+        );
+    }
+
+    #[test]
+    fn unknown_resolution_falls_back_to_1080p() {
+        let mut input = payload();
+        input["connection"]["external_config"]["resolution"] = json!("bogus");
+        let options = RdpConnectOptions::from_lifecycle(&input).unwrap();
+        assert_eq!(
+            (options.desktop_width, options.desktop_height),
+            (1920, 1080)
+        );
+        assert!(!options.auto_resize);
     }
 
     #[test]

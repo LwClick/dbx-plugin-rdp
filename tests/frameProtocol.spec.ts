@@ -6,7 +6,8 @@ import {
   FRAME_TYPE_BITMAP,
   FRAME_TYPE_RESIZE,
   FrameProtocolError,
-  expectedChunkBytes,
+  chunkRowCount,
+  frameMatchesSurface,
   isFullDesktopFrame,
   parseFrameHeader,
   splitFrame,
@@ -75,14 +76,58 @@ describe("frame protocol", () => {
     expect(header.sessionId).toBe(7);
     expect(header.desktopWidth).toBe(1920);
     expect(isFullDesktopFrame(header)).toBe(true);
-    expect(expectedChunkBytes(header)).toBe(1920 * 1080 * 4);
+    expect(chunkRowCount(header, 1920 * 1080 * 4)).toBe(1080);
+  });
+
+  it("detects a frame that needs a new surface size", () => {
+    const header = parseFrameHeader(frame());
+    expect(frameMatchesSurface(header, 1920, 1080)).toBe(true);
+    expect(frameMatchesSurface(header, 1280, 800)).toBe(false);
   });
 
   it("parses a row-aligned chunk", () => {
-    const header = parseFrameHeader(frame({ y: 100, rowStart: 50, height: 200, payload: new Uint8Array(1920 * 150 * 4) }));
+    const payload = new Uint8Array(1920 * 150 * 4);
+    const header = parseFrameHeader(frame({ y: 100, rowStart: 50, height: 200, payload }));
     expect(header.rowStart).toBe(50);
-    expect(expectedChunkBytes(header)).toBe(1920 * 150 * 4);
+    expect(chunkRowCount(header, payload.length)).toBe(150);
     expect(isFullDesktopFrame(header)).toBe(false);
+  });
+
+  it("parses the first chunk of a multi-chunk 1080p frame", () => {
+    const payload = new Uint8Array(1920 * 546 * 4);
+    const message = frame({
+      rowStart: 0,
+      chunkIndex: 0,
+      chunkCount: 2,
+      payload,
+    });
+    const fragment = splitFrame(message);
+    expect(fragment.header.chunkIndex).toBe(0);
+    expect(fragment.header.chunkCount).toBe(2);
+    expect(chunkRowCount(fragment.header, fragment.payload.length)).toBe(546);
+  });
+
+  it("parses the last chunk of a multi-chunk 1080p frame", () => {
+    const payload = new Uint8Array(1920 * 534 * 4);
+    const message = frame({
+      rowStart: 546,
+      chunkIndex: 1,
+      chunkCount: 2,
+      payload,
+    });
+    const fragment = splitFrame(message);
+    expect(fragment.header.rowStart).toBe(546);
+    expect(chunkRowCount(fragment.header, fragment.payload.length)).toBe(534);
+  });
+
+  it("rejects a chunk that is not row-aligned", () => {
+    const payload = new Uint8Array(1920 * 546 * 4 - 4);
+    expect(() => splitFrame(frame({ chunkCount: 2, payload }))).toThrow(FrameProtocolError);
+  });
+
+  it("rejects a chunk that overflows the rectangle", () => {
+    const payload = new Uint8Array(1920 * 535 * 4);
+    expect(() => splitFrame(frame({ rowStart: 546, chunkCount: 2, payload }))).toThrow(FrameProtocolError);
   });
 
   it("accepts resize frames without payload", () => {

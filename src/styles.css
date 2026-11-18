@@ -113,6 +113,99 @@ button {
   background: var(--color-muted, #26272c);
 }
 
+.toolbar__select {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rdp-foreground);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.toolbar__badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rdp-accent) 12%, transparent);
+  color: var(--rdp-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.rdp-app--chrome .toolbar,
+.rdp-app--chrome .statusbar {
+  display: none;
+}
+
+.toolbar__zoom {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar__zoom button {
+  padding: 0 7px;
+}
+
+.fs-toolbar {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--rdp-panel) 94%, transparent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -14px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.fs-toolbar--visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.fs-toolbar button {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rdp-foreground);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.fs-toolbar button:hover {
+  background: var(--color-muted, #26272c);
+}
+
+.fs-toolbar button.button--primary {
+  border-color: var(--rdp-accent);
+  background: var(--rdp-accent);
+  color: var(--rdp-accent-foreground);
+}
+
+.fs-toolbar__zoom {
+  min-width: 54px;
+  color: var(--rdp-muted);
+}
+
 .toolbar button.button--active {
   border-color: color-mix(in srgb, var(--rdp-accent) 60%, var(--rdp-border));
   background: color-mix(in srgb, var(--rdp-accent) 18%, transparent);
@@ -168,6 +261,55 @@ button {
   background: #000;
 }
 
+.focus-hint {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  z-index: 4;
+  padding: 5px 12px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rdp-panel) 88%, transparent);
+  color: var(--rdp-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+
+.focus-hint:hover {
+  background: var(--rdp-panel);
+}
+
+.stats-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 4;
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--rdp-panel) 92%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  color: var(--rdp-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.stats-panel div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stats-panel b {
+  color: var(--rdp-foreground);
+  font-weight: 600;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -220,13 +362,108 @@ button {
   overflow-wrap: anywhere;
 }
 
+.overlay__progress {
+  color: var(--rdp-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .overlay__card button {
   height: 30px;
   margin-top: 4px;
   padding: 0 14px;
   border: 1px solid var(--rdp-border);
   border-radius: 6px;
+  background: transparent;
+  color: var(--rdp-foreground);
   cursor: pointer;
+}
+
+.overlay__card button:disabled,
+.toolbar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.overlay__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overlay__actions .spinner {
+  display: inline-block;
+  margin-right: 8px;
+  vertical-align: -2px;
+}
+
+.file-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(680px, 90%);
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 8px;
+  background: var(--rdp-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  transform: translateX(-50%);
+}
+
+.file-banner__text {
+  overflow: hidden;
+  color: var(--rdp-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-banner button {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--rdp-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rdp-foreground);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.file-banner button.button--primary {
+  border-color: var(--rdp-accent);
+  background: var(--rdp-accent);
+  color: var(--rdp-accent-foreground);
+}
+
+.file-banner button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.file-banner__close {
+  padding: 0 8px !important;
+  font-size: 14px !important;
+  line-height: 1;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--rdp-accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--rdp-accent) 12%, rgba(0, 0, 0, 0.55));
+  color: var(--rdp-foreground);
+  font-size: 14px;
+  pointer-events: none;
+  text-align: center;
 }
 
 .spinner {

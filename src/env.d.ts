@@ -15,14 +15,44 @@ interface DbxPluginStorage {
 interface DbxPluginClipboard {
   readText(): Promise<string>;
   writeText(text: string): Promise<void>;
+  readImage?(): Promise<string>;
 }
 
 interface DbxPluginInit {
-  capabilities?: Record<string, boolean | undefined>;
+  capabilities?: Record<string, unknown>;
   locale?: string;
   theme?: { appearance?: string; tokens?: Record<string, string> };
   context?: Record<string, unknown>;
   contributionId?: string;
+}
+
+interface DbxPluginFileTransferRead {
+  handleId: string;
+  name: string;
+  size: number;
+  contentType?: string;
+  relativePath?: string;
+}
+
+interface DbxPluginFileTransfer {
+  pick(options: { multiple?: boolean }): Promise<{ files: DbxPluginFileTransferRead[] }>;
+  read(
+    handleId: string,
+    offset: number,
+    length?: number,
+  ): Promise<{ dataBase64: string; length: number; eof: boolean }>;
+  beginSave(options: {
+    name: string;
+    contentType?: string;
+    size?: number;
+  }): Promise<{ handleId: string; chunkBytes: number } | null>;
+  write(handleId: string, offset: number, data: string | ArrayBuffer | Uint8Array): Promise<{ written: number; nextOffset: number }>;
+  finish(handleId: string): Promise<void>;
+  cancel(handleId: string): Promise<void>;
+  onDrop(
+    listener: (files: DbxPluginFileTransferRead[], info: { dropId: string; truncated: boolean }) => void,
+  ): () => void;
+  onDragState(listener: (active: boolean) => void): () => void;
 }
 
 interface DbxPluginApi {
@@ -31,7 +61,7 @@ interface DbxPluginApi {
   context: Record<string, unknown>;
   locale: string;
   theme: { appearance?: string; tokens?: Record<string, string> };
-  capabilities: Record<string, boolean | undefined>;
+  capabilities: Record<string, unknown>;
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
   invoke<T = unknown>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   notify(method: string, params?: unknown): Promise<void>;
@@ -42,9 +72,11 @@ interface DbxPluginApi {
   onInit(listener: (init: DbxPluginInit) => void): () => void;
   storage?: DbxPluginStorage;
   clipboard?: DbxPluginClipboard;
+  fileTransfer?: DbxPluginFileTransfer;
   copy?(text: string): Promise<void>;
   reopenConnection?(connectionId: string): Promise<{ ok?: boolean }>;
   setTitle?(title: string | null): Promise<void>;
+  closeWorkbench?(): Promise<void>;
 }
 
 declare global {

@@ -100,14 +100,32 @@ export function rdpButton(button: number): number | null {
   }
 }
 
-/** Wheel notch in RDP rotation units; browser deltaY is positive downwards. */
-export function wheelDelta(deltaY: number, deltaX = 0): { vertical: boolean; delta: number } {
+/**
+ * Converts a browser wheel delta to RDP rotation units (browser deltaY is
+ * positive downwards, RDP positive is upwards).
+ *
+ * Pixel deltas are forwarded as-is so trackpads scroll smoothly instead of
+ * jumping one full notch per event; line/page deltas keep the classic 120-unit
+ * notch. RemoteCanvas accumulates the remainder between animation frames.
+ */
+export function wheelUnits(
+  deltaY: number,
+  deltaX = 0,
+  deltaMode = 0,
+): { vertical: boolean; delta: number } {
   const vertical = Math.abs(deltaY) >= Math.abs(deltaX);
   const raw = vertical ? deltaY : deltaX;
   if (!Number.isFinite(raw) || raw === 0) {
     return { vertical, delta: 0 };
   }
-  const units = Math.sign(raw) * 120;
+  let units: number;
+  if (deltaMode === 1) {
+    units = raw * 120;
+  } else if (deltaMode === 2) {
+    units = raw * 360;
+  } else {
+    units = Math.max(-255, Math.min(255, Math.round(raw)));
+  }
   return { vertical, delta: -units };
 }
 

@@ -3,13 +3,16 @@ use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use dbx_plugin_sdk::{PluginEmitter, PluginError, PluginHandler, RequestContext};
 use serde_json::{Value, json};
 use tokio::runtime::{Builder, Runtime};
 
 use crate::cert::PinStore;
 use crate::credentials::RdpConnectOptions;
-use crate::protocol::{INPUT_CHANNEL, parse_input};
+use crate::files::UPLOAD_CHUNK_BYTES;
+use crate::protocol::{CLIPBOARD_CHANNEL, INPUT_CHANNEL, parse_clipboard_chunk, parse_input};
 use crate::session::RdpSession;
 
 pub struct RdpPlugin {
@@ -138,7 +141,20 @@ impl RdpPlugin {
         let connection_id = Self::connection_id(params)?;
         let session = self.session(connection_id)?;
         match method {
-            "rdp/attach" => Ok(session.attach()),
+            "rdp/attach" => {
+                let viewport = params.get("viewport").and_then(|viewport| {
+                    let width = viewport
+                        .get("width")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok())?;
+                    let height = viewport
+                        .get("height")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok())?;
+                    Some((width, height))
+                });
+                Ok(session.attach(viewport))
+            }
             "rdp/detach" => {
                 let session_id = params
                     .get("sessionId")
@@ -176,19 +192,126 @@ impl RdpPlugin {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                session.paste(text);
-                Ok(json!({ "ok": true }))
+                Ok(session.paste(text))
             }
-            "rdp/clipboardText" => {
+            "rdp/clipboard/local" => {
                 let text = params
                     .get("text")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                session.set_clipboard(text);
+                session.advertise_local_text(text)
+            }
+            "rdp/clipboard/content/paste" => {
+                let token = params
+                    .get("token")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| PluginError::new(-32602, "Invalid clipboard image token"))?;
+                let text = params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                session.paste_image(token, text)
+            }
+            "rdp/clipboard/image/read" => {
+                let token = required_str(params, "token")?;
+                let offset = params
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let length = params
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::from(crate::files::DOWNLOAD_CHUNK_BYTES));
+                session.read_clipboard_image(token, offset, length)
+            }
+            "rdp/clipboard/image/release" => {
+                let token = required_str(params, "token")?;
+                session.release_clipboard_image(token);
+                Ok(json!({ "ok": true }))
+            }
+            "rdp/files/upload/begin" => {
+                let token = required_str(params, "token")?;
+                let name = required_str(params, "name")?;
+                let relative_path = params.get("relativePath").and_then(Value::as_str);
+                let size = params
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let index = session.begin_upload(token, name, relative_path, size)?;
+                Ok(json!({ "index": index }))
+            }
+            "rdp/files/upload/chunk" => {
+                let token = required_str(params, "token")?;
+                let index = params
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| PluginError::new(-32602, "Invalid file index"))?;
+                let offset = params
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| PluginError::new(-32602, "Missing chunk offset"))?;
+                let encoded = required_str(params, "dataBase64")?;
+                if encoded.len() > UPLOAD_CHUNK_BYTES * 4 / 3 + 8 {
+                    return Err(PluginError::new(-32602, "Chunk is too large"));
+                }
+                let data = BASE64
+                    .decode(encoded)
+                    .map_err(|_| PluginError::new(-32602, "Invalid base64 chunk"))?;
+                if data.len() > UPLOAD_CHUNK_BYTES {
+                    return Err(PluginError::new(-32602, "Chunk is too large"));
+                }
+                let written = session.write_upload_chunk(token, index, offset, &data)?;
+                Ok(json!({ "written": written }))
+            }
+            "rdp/files/upload/finish" => {
+                let token = required_str(params, "token")?;
+                let index = params
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| PluginError::new(-32602, "Invalid file index"))?;
+                session.finish_upload(token, index)?;
+                Ok(json!({ "ok": true }))
+            }
+            "rdp/files/upload/cancel" => {
+                let token = required_str(params, "token")?;
+                session.cancel_upload(token);
+                Ok(json!({ "ok": true }))
+            }
+            "rdp/files/advertise" => {
+                let token = required_str(params, "token")?;
+                session.advertise_files(token)
+            }
+            "rdp/files/download" => session.start_download(),
+            "rdp/files/read" => {
+                let token = required_str(params, "token")?;
+                let offset = params
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                let length = params
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::from(crate::files::DOWNLOAD_CHUNK_BYTES));
+                session.read_download(token, offset, length)
+            }
+            "rdp/files/release" => {
+                let token = required_str(params, "token")?;
+                session.release_download(token);
                 Ok(json!({ "ok": true }))
             }
             "rdp/security" => Ok(session.security()),
+            "rdp/disconnect" => {
+                // Cancels the sidecar-side reconnect loop; the host can create
+                // a fresh session through connection/connect on the next try.
+                if let Some(session) = self.remove_session(connection_id) {
+                    session.disconnect();
+                }
+                Ok(json!({ "ok": true }))
+            }
             other => Err(PluginError::method_not_found(other)),
         }
     }
@@ -229,6 +352,19 @@ impl PluginHandler for RdpPlugin {
         data: Vec<u8>,
         _emitter: &PluginEmitter,
     ) -> Result<(), PluginError> {
+        if channel == CLIPBOARD_CHANNEL {
+            let chunk = parse_clipboard_chunk(&data)
+                .map_err(|error| PluginError::new(-32602, error.to_string()))?;
+            let session = self
+                .sessions_by_id
+                .lock()
+                .ok()
+                .and_then(|sessions| sessions.get(&chunk.session_id).cloned());
+            return match session {
+                Some(session) => session.handle_clipboard_chunk(chunk),
+                None => Ok(()),
+            };
+        }
         if channel != INPUT_CHANNEL {
             return Err(PluginError::new(
                 -32601,
@@ -267,4 +403,12 @@ impl Drop for RdpPlugin {
             by_id.clear();
         }
     }
+}
+
+fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, PluginError> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| PluginError::new(-32602, format!("Missing {key}")))
 }

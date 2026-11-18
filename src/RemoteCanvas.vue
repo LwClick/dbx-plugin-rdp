@@ -4,9 +4,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   FRAME_TYPE_BITMAP,
   FRAME_TYPE_RESIZE,
+  chunkRowCount,
+  frameMatchesSurface,
   isFullDesktopFrame,
   splitFrame,
 } from "./frameProtocol";
+import { scaleRgbaNearest } from "./pixels";
+import { targetDesktopSize } from "./viewport";
 import {
   focusSyncPacket,
   keyPacket,
@@ -15,24 +19,36 @@ import {
   rdpButton,
   releaseAllPacket,
   unicodePacket,
-  wheelDelta,
   wheelPacket,
+  wheelUnits,
 } from "./input";
-import { sendInput } from "./bridge";
+import { readClipboard, sendInput } from "./bridge";
+import type { PasteContent } from "./clipboard";
 import { ALT, CTRL, DELETE_KEY, META, V_KEY, scancodeForCode } from "./scancodes";
+import { remapMacCommand, shortcutTapKeys } from "./shortcuts";
 
-const props = defineProps<{
-  sessionId: number | null;
-  desktopWidth: number;
-  desktopHeight: number;
-}>();
+const props = withDefaults(
+  defineProps<{
+    sessionId: number | null;
+    desktopWidth: number;
+    desktopHeight: number;
+    autoResize?: boolean;
+    cursorStyle?: string;
+    zoom?: "fit" | number;
+    remapShortcuts?: boolean;
+  }>(),
+  { autoResize: true, cursorStyle: "default", zoom: "fit", remapShortcuts: true },
+);
 
 const emit = defineEmits<{
   (event: "desktop-size", width: number, height: number): void;
   (event: "resize-request", width: number, height: number): void;
   (event: "full-frame-request"): void;
-  (event: "paste-request"): void;
+  (event: "paste-text", text: string): void;
+  (event: "paste-content", content: PasteContent): void;
+  (event: "paste-error", reason: "unsupported" | "denied" | "empty" | "invalid-image"): void;
   (event: "focused", value: boolean): void;
+  (event: "zoom-change", action: "in" | "out" | "reset"): void;
 }>();
 
 const stage = ref<HTMLDivElement | null>(null);
@@ -47,12 +63,28 @@ let dirty: { x: number; y: number; width: number; height: number } | null = null
 let drawScheduled = false;
 let pending: { seq: number; total: number; received: number; full: boolean } | null = null;
 let awaitingFull = true;
-let lastFullRequest = 0;
+let fullRetryTimer: number | null = null;
 let resizeTimer: number | null = null;
+let lastRequestedSize: { width: number; height: number } | null = null;
 let mouseFrame: number | null = null;
 let pendingMouse: { x: number; y: number } | null = null;
+let wheelFrame: number | null = null;
+const pendingWheel = { vertical: true, delta: 0, x: 0, y: 0 };
 let interceptedPaste = false;
+const suppressedZoomKeys = new Set<string>();
 let resizeObserver: ResizeObserver | null = null;
+const pressedButtons = new Set<number>();
+let lastRemote = { x: 0, y: 0 };
+let pasteToken = 0;
+let pasteFallbackTimer: number | null = null;
+let lastPaste = { text: "", at: 0 };
+// The sandboxed workbench may not deliver a native paste event on every host.
+// Give it a short head start, then fall back to the gated host clipboard API.
+const PASTE_FALLBACK_MS = 150;
+const PASTE_DEDUPE_MS = 500;
+// macOS Cmd maps to the remote Windows key, so forwarding it would tap Start
+// and steal focus. Cmd+V must stay untouched so the native paste event fires.
+const isMacPlatform = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
 
 const focused = ref(false);
 const stageWidth = ref(0);
@@ -64,15 +96,24 @@ const canvasStyle = computed(() => {
   // `surfaceVersion` makes this computed re-run when the remote framebuffer is
   // recreated even though the pixel dimensions are plain variables.
   void surfaceVersion.value;
-  if (surfaceWidth === 0 || surfaceHeight === 0) return {};
+  const cursor = props.cursorStyle || "default";
+  if (surfaceWidth === 0 || surfaceHeight === 0) return { cursor };
   const availableWidth = stageWidth.value || surfaceWidth;
   const availableHeight = stageHeight.value || surfaceHeight;
-  const scale = Math.min(availableWidth / surfaceWidth, availableHeight / surfaceHeight, 1);
+  // Always fit the stage, including upscaling. A smaller remote framebuffer
+  // must never leave permanent black bars around the workbench.
+  const scale =
+    typeof props.zoom === "number"
+      ? Math.max(0.1, props.zoom / 100)
+      : Math.min(availableWidth / surfaceWidth, availableHeight / surfaceHeight);
   return {
     width: `${Math.max(1, Math.floor(surfaceWidth * scale))}px`,
     height: `${Math.max(1, Math.floor(surfaceHeight * scale))}px`,
+    cursor,
   };
 });
+
+const manualZoom = computed(() => typeof props.zoom === "number");
 
 onMounted(() => {
   resetSurface(props.desktopWidth, props.desktopHeight);
@@ -81,28 +122,73 @@ onMounted(() => {
     scheduleRemoteResize();
   });
   if (stage.value) resizeObserver.observe(stage.value);
-  window.addEventListener("resize", fitToStage);
+  window.addEventListener("resize", onWindowResize);
+  window.addEventListener("mouseup", onGlobalMouseUp);
+  window.addEventListener("blur", releasePressedButtons);
+  document.addEventListener("visibilitychange", onVisibilityChange);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
-  window.removeEventListener("resize", fitToStage);
+  releasePressedButtons();
+  window.removeEventListener("resize", onWindowResize);
+  window.removeEventListener("mouseup", onGlobalMouseUp);
+  window.removeEventListener("blur", releasePressedButtons);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+  if (pasteFallbackTimer !== null) window.clearTimeout(pasteFallbackTimer);
+  stopFullRetry();
   if (mouseFrame !== null) cancelAnimationFrame(mouseFrame);
+  if (wheelFrame !== null) cancelAnimationFrame(wheelFrame);
 });
 
 watch(
   () => [props.desktopWidth, props.desktopHeight] as const,
   ([width, height]) => {
     if (width === surfaceWidth && height === surfaceHeight) return;
-    resetSurface(width, height);
+    adoptSize(width, height);
+    requestFullWithRetry();
   },
 );
 
-function resetSurface(width: number, height: number) {
+watch(
+  () => props.sessionId,
+  (sessionId) => {
+    stopFullRetry();
+    if (sessionId !== null) {
+      awaitingFull = true;
+      requestFullWithRetry();
+      scheduleRemoteResize();
+    }
+  },
+);
+
+watch(
+  () => props.autoResize,
+  (enabled) => {
+    if (enabled) scheduleRemoteResize();
+  },
+);
+
+function onVisibilityChange() {
+  fitToStage();
+  releasePressedButtons();
+  scheduleRemoteResize();
+}
+
+function onWindowResize() {
+  fitToStage();
+  scheduleRemoteResize();
+}
+
+function resetSurface(width: number, height: number, preserve = false) {
   const element = canvas.value;
   if (!element || width <= 0 || height <= 0) return;
+  const previous =
+    preserve && imageData && surfaceWidth > 0 && surfaceHeight > 0
+      ? { data: imageData.data, width: surfaceWidth, height: surfaceHeight }
+      : null;
   surfaceWidth = width;
   surfaceHeight = height;
   element.width = width;
@@ -111,16 +197,30 @@ function resetSurface(width: number, height: number) {
   if (!context) return;
   context.imageSmoothingEnabled = false;
   imageData = context.createImageData(width, height);
-  for (let index = 3; index < imageData.data.length; index += 4) {
-    imageData.data[index] = 255;
+  if (previous) {
+    // Keep the previous picture (scaled) until the server repaints. Clearing
+    // to black here is what turned a dropped resize frame into a black screen.
+    imageData.data.set(
+      scaleRgbaNearest(previous.data, previous.width, previous.height, width, height),
+    );
+  } else {
+    for (let index = 3; index < imageData.data.length; index += 4) {
+      imageData.data[index] = 255;
+    }
   }
-  context.fillStyle = "#000";
-  context.fillRect(0, 0, width, height);
+  context.putImageData(imageData, 0, 0);
   dirty = null;
   pending = null;
   awaitingFull = true;
   surfaceVersion.value += 1;
   fitToStage();
+}
+
+function adoptSize(width: number, height: number) {
+  if (width === surfaceWidth && height === surfaceHeight) return;
+  lastRequestedSize = null;
+  resetSurface(width, height, true);
+  emit("desktop-size", width, height);
 }
 
 function fitToStage() {
@@ -135,13 +235,20 @@ function scheduleRemoteResize() {
   resizeTimer = window.setTimeout(() => {
     resizeTimer = null;
     const element = stage.value;
-    if (!element || props.sessionId === null) return;
+    if (!element || props.sessionId === null || !props.autoResize) return;
     const availableWidth = element.clientWidth;
     const availableHeight = element.clientHeight;
     if (availableWidth < 320 || availableHeight < 240) return;
-    const width = Math.max(1024, Math.min(2560, Math.round(availableWidth)));
-    const height = Math.max(600, Math.min(1600, Math.round((width * availableHeight) / availableWidth)));
+    const { width, height } = targetDesktopSize(availableWidth, availableHeight);
+    if (
+      lastRequestedSize &&
+      Math.abs(width - lastRequestedSize.width) <= 24 &&
+      Math.abs(height - lastRequestedSize.height) <= 24
+    ) {
+      return;
+    }
     if (Math.abs(width - props.desktopWidth) > 24 || Math.abs(height - props.desktopHeight) > 24) {
+      lastRequestedSize = { width, height };
       emit("resize-request", width, height);
     }
   }, 300);
@@ -159,40 +266,52 @@ function handleBinary(data: Uint8Array) {
 
   if (header.frameType === FRAME_TYPE_RESIZE) {
     if (header.desktopWidth === surfaceWidth && header.desktopHeight === surfaceHeight) return;
-    resetSurface(header.desktopWidth, header.desktopHeight);
-    emit("desktop-size", header.desktopWidth, header.desktopHeight);
+    adoptSize(header.desktopWidth, header.desktopHeight);
+    requestFullWithRetry();
     return;
   }
   if (header.frameType !== FRAME_TYPE_BITMAP || header.chunkCount === 0) return;
 
   const full = isFullDesktopFrame(header);
+  if (!imageData || !frameMatchesSurface(header, surfaceWidth, surfaceHeight)) {
+    // The host drops binary messages that race the iframe load. If the resize
+    // notification or the first full frame is lost, adopt the size carried by
+    // the next bitmap instead of discarding every later update.
+    adoptSize(header.desktopWidth, header.desktopHeight);
+    if (!full) {
+      requestFullWithRetry();
+      return;
+    }
+  }
   if (pending && header.seq !== pending.seq) {
     if (pending.received < pending.total) {
-      requestFull();
       pending = null;
       awaitingFull = true;
+      requestFullWithRetry();
       return;
     }
     pending = null;
   }
   if (awaitingFull && !full) {
-    requestFull();
+    requestFullWithRetry();
     return;
   }
   if (!pending) {
     pending = { seq: header.seq, total: header.chunkCount, received: 0, full };
   }
   if (header.chunkIndex !== pending.received) {
-    requestFull();
     pending = null;
     awaitingFull = true;
-    return;
-  }
-  if (!imageData || surfaceWidth !== header.desktopWidth || surfaceHeight !== header.desktopHeight) {
+    requestFullWithRetry();
     return;
   }
 
-  const rows = header.height - header.rowStart;
+  if (!imageData) {
+    awaitingFull = true;
+    requestFullWithRetry();
+    return;
+  }
+  const rows = chunkRowCount(header, fragment.payload.length);
   if (rows <= 0 || header.width === 0) return;
   const rowBytes = header.width * 4;
   const destination = imageData.data;
@@ -207,6 +326,7 @@ function handleBinary(data: Uint8Array) {
   if (pending.received >= pending.total) {
     if (pending.full && awaitingFull) {
       awaitingFull = false;
+      stopFullRetry();
     }
     pending = null;
   }
@@ -237,15 +357,33 @@ function scheduleDraw() {
   });
 }
 
-function requestFull() {
-  const now = performance.now();
-  if (now - lastFullRequest < 250) return;
-  lastFullRequest = now;
-  emit("full-frame-request");
+function requestFullWithRetry() {
+  if (props.sessionId === null || !awaitingFull || fullRetryTimer !== null) return;
+  let attempts = 0;
+  const tick = () => {
+    fullRetryTimer = null;
+    if (!awaitingFull || props.sessionId === null || attempts >= 10) return;
+    attempts += 1;
+    emit("full-frame-request");
+    fullRetryTimer = window.setTimeout(tick, 500);
+  };
+  tick();
+}
+
+function stopFullRetry() {
+  if (fullRetryTimer !== null) {
+    window.clearTimeout(fullRetryTimer);
+    fullRetryTimer = null;
+  }
 }
 
 function focusInput() {
   inputSink.value?.focus({ preventScroll: true });
+}
+
+function onStagePointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  focusInput();
 }
 
 function onFocus() {
@@ -257,6 +395,7 @@ function onFocus() {
 
 function onBlur() {
   focused.value = false;
+  suppressedZoomKeys.clear();
   emit("focused", false);
   send(releaseAllPacket(props.sessionId ?? 0));
 }
@@ -300,20 +439,64 @@ function sendUnicode(character: string) {
   sendInput(unicodePacket(props.sessionId, codepoint, false));
 }
 
+function zoomShortcut(event: KeyboardEvent): "in" | "out" | "reset" | null {
+  const modifier = isMacPlatform
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+  if (!modifier || event.altKey) return null;
+  const code = event.code;
+  // Cmd+Plus arrives as Cmd+Shift+Equal on macOS.
+  if (code === "Equal" || code === "NumpadAdd") return "in";
+  if (event.shiftKey) return null;
+  if (code === "Minus" || code === "NumpadSubtract") return "out";
+  if (code === "Digit0" || code === "Numpad0") return "reset";
+  return null;
+}
+
 function onKeyDown(event: KeyboardEvent) {
   if (event.isComposing) return;
   rememberModifiers(event);
-  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v" && event.shiftKey) {
+  const zoom = zoomShortcut(event);
+  if (zoom) {
     event.preventDefault();
-    event.stopPropagation();
-    emit("paste-request");
-    interceptedPaste = true;
+    suppressedZoomKeys.add(event.code);
+    emit("zoom-change", zoom);
     return;
   }
-  if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "v") {
+  const pasteCombo = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v";
+  if (isMacPlatform && event.metaKey) {
+    if (pasteCombo) {
+      // Leave the default action intact so the browser can emit `paste`.
+      beginPasteShortcut();
+      return;
+    }
+    const shortcut = remapMacCommand(event, props.remapShortcuts);
+    if (shortcut) {
+      event.preventDefault();
+      const keys = shortcutTapKeys(shortcut);
+      for (const key of keys) sendKey(key, true);
+      for (const key of [...keys].reverse()) sendKey(key, false);
+      return;
+    }
+    // Cmd combinations without a Windows equivalent stay local; forwarding
+    // Cmd itself would tap the remote Start menu.
     event.preventDefault();
-    event.stopPropagation();
-    emit("paste-request");
+    return;
+  }
+  if (pasteCombo) {
+    if (isMacPlatform) {
+      // Ctrl+V is not a browser paste shortcut on macOS. Forward it as a real
+      // remote Ctrl+V so a Windows app can paste from its own clipboard.
+      const scancode = scancodeForCode(event.code);
+      if (scancode) {
+        event.preventDefault();
+        sendKey(scancode, true);
+      }
+      return;
+    }
+    // Ctrl+V is left to the browser so a native `paste` event can deliver the
+    // clipboard text; the API fallback covers hosts that swallow it.
+    beginPasteShortcut();
     interceptedPaste = true;
     return;
   }
@@ -332,6 +515,15 @@ function onKeyDown(event: KeyboardEvent) {
 function onKeyUp(event: KeyboardEvent) {
   if (event.isComposing) return;
   rememberModifiers(event);
+  // Do not forward the release of a key whose press was consumed by local
+  // zoom, even if the user releases the modifier first.
+  if (suppressedZoomKeys.delete(event.code)) {
+    event.preventDefault();
+    return;
+  }
+  if (isMacPlatform && (event.metaKey || event.code === "MetaLeft" || event.code === "MetaRight")) {
+    return;
+  }
   if (interceptedPaste && event.key.toLowerCase() === "v") {
     interceptedPaste = false;
     event.preventDefault();
@@ -352,6 +544,91 @@ function onCompositionEnd(event: CompositionEvent) {
   }
 }
 
+function queuePaste(text: string) {
+  if (!text) return;
+  const now = Date.now();
+  if (text === lastPaste.text && now - lastPaste.at < PASTE_DEDUPE_MS) return;
+  lastPaste = { text, at: now };
+  emit("paste-text", text);
+}
+
+function beginPasteShortcut() {
+  const token = ++pasteToken;
+  if (pasteFallbackTimer !== null) window.clearTimeout(pasteFallbackTimer);
+  pasteFallbackTimer = window.setTimeout(() => {
+    pasteFallbackTimer = null;
+    if (token !== pasteToken) return;
+    void readClipboard().then((result) => {
+      if (token !== pasteToken) return;
+      if (!result.ok) {
+        emit("paste-error", result.reason);
+        return;
+      }
+      queuePaste(result.text);
+    });
+  }, PASTE_FALLBACK_MS);
+}
+
+function cancelPasteFallback() {
+  pasteToken += 1;
+  if (pasteFallbackTimer !== null) {
+    window.clearTimeout(pasteFallbackTimer);
+    pasteFallbackTimer = null;
+  }
+}
+
+function onPaste(event: ClipboardEvent) {
+  const data = event.clipboardData;
+  const text = data?.getData("text/plain") ?? "";
+  let imageFile: File | null = null;
+  if (data?.items) {
+    for (const item of Array.from(data.items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        imageFile = item.getAsFile();
+        if (imageFile) break;
+      }
+    }
+  }
+  if (inputSink.value) inputSink.value.value = "";
+  if (!text && !imageFile) return;
+  event.preventDefault();
+  cancelPasteFallback();
+  if (imageFile) {
+    const file = imageFile;
+    void imageToPng(file)
+      .then((bytes) => {
+        emit("paste-content", {
+          text: text || undefined,
+          image: { bytes, mime: "image/png", name: file.name || "clipboard.png" },
+        });
+      })
+      .catch(() => emit("paste-error", "invalid-image"));
+    return;
+  }
+  queuePaste(text);
+}
+
+/** The sidecar expects PNG; WebKit may hand over TIFF or JPEG images. */
+async function imageToPng(file: File): Promise<ArrayBuffer> {
+  if (file.type === "image/png") return await file.arrayBuffer();
+  const bitmap = await createImageBitmap(file);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Cannot encode the clipboard image");
+    context.drawImage(bitmap, 0, 0);
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/png");
+    });
+    if (!blob) throw new Error("Cannot encode the clipboard image");
+    return await blob.arrayBuffer();
+  } finally {
+    bitmap.close?.();
+  }
+}
+
 function remoteCoordinates(event: MouseEvent): { x: number; y: number } {
   const element = canvas.value;
   if (!element) return { x: 0, y: 0 };
@@ -364,40 +641,103 @@ function remoteCoordinates(event: MouseEvent): { x: number; y: number } {
 }
 
 function onMouseMove(event: MouseEvent) {
-  pendingMouse = remoteCoordinates(event);
+  const position = remoteCoordinates(event);
+  lastRemote = position;
+  pendingMouse = position;
   if (mouseFrame !== null) return;
   mouseFrame = requestAnimationFrame(() => {
     mouseFrame = null;
-    const position = pendingMouse;
+    const pendingPosition = pendingMouse;
     pendingMouse = null;
-    if (!position || props.sessionId === null) return;
-    sendInput(mouseMovePacket(props.sessionId, position.x, position.y));
+    if (!pendingPosition || props.sessionId === null) return;
+    sendInput(mouseMovePacket(props.sessionId, pendingPosition.x, pendingPosition.y));
   });
 }
 
 function onMouseDown(event: MouseEvent) {
   event.preventDefault();
-  focusInput();
+  // Only the left button moves keyboard focus; focusing on right click is what
+  // made the native context menu fight the remote one.
+  if (event.button === 0) focusInput();
   const button = rdpButton(event.button);
   if (button === null || props.sessionId === null) return;
   const position = remoteCoordinates(event);
+  lastRemote = position;
+  pressedButtons.add(event.button);
   sendInput(mouseButtonPacket(props.sessionId, button, true, position.x, position.y));
 }
 
 function onMouseUp(event: MouseEvent) {
+  const position = remoteCoordinates(event);
+  lastRemote = position;
   const button = rdpButton(event.button);
   if (button === null || props.sessionId === null) return;
-  const position = remoteCoordinates(event);
+  // Only release buttons the remote actually saw pressed. The browser also
+  // emits a mouseup for the suppressed native context menu.
+  if (!pressedButtons.delete(event.button)) return;
   sendInput(mouseButtonPacket(props.sessionId, button, false, position.x, position.y));
+}
+
+function onContextMenu(event: MouseEvent) {
+  event.preventDefault();
+  // Native menus can swallow the following mouseup and leave a remote button
+  // held down, which shows a persistent translucent selection overlay.
+  releasePressedButtons();
+}
+
+function onGlobalMouseUp(event: MouseEvent) {
+  // Release buttons whose mouseup happened outside the canvas (toolbar, native
+  // menus, window edges) so the remote never keeps a button stuck.
+  if (!pressedButtons.has(event.button)) return;
+  const button = rdpButton(event.button);
+  pressedButtons.delete(event.button);
+  if (button === null || props.sessionId === null) return;
+  sendInput(mouseButtonPacket(props.sessionId, button, false, lastRemote.x, lastRemote.y));
+}
+
+function releasePressedButtons() {
+  if (props.sessionId === null || pressedButtons.size === 0) return;
+  for (const pressed of pressedButtons) {
+    const button = rdpButton(pressed);
+    if (button !== null) {
+      sendInput(mouseButtonPacket(props.sessionId, button, false, lastRemote.x, lastRemote.y));
+    }
+  }
+  pressedButtons.clear();
 }
 
 function onWheel(event: WheelEvent) {
   event.preventDefault();
   if (props.sessionId === null) return;
-  const { vertical, delta } = wheelDelta(event.deltaY, event.deltaX);
+  const { vertical, delta } = wheelUnits(event.deltaY, event.deltaX, event.deltaMode);
   if (delta === 0) return;
   const position = remoteCoordinates(event);
-  sendInput(wheelPacket(props.sessionId, vertical, delta, position.x, position.y));
+  // Trackpads emit dozens of tiny deltas per gesture. Sum them per animation
+  // frame so the remote receives one smooth packet instead of overshooting.
+  if (pendingWheel.delta !== 0 && pendingWheel.vertical !== vertical) {
+    flushWheel();
+  }
+  pendingWheel.vertical = vertical;
+  pendingWheel.delta = Math.max(-32767, Math.min(32767, pendingWheel.delta + delta));
+  pendingWheel.x = position.x;
+  pendingWheel.y = position.y;
+  if (wheelFrame === null) {
+    wheelFrame = requestAnimationFrame(() => {
+      wheelFrame = null;
+      flushWheel();
+    });
+  }
+}
+
+function flushWheel() {
+  if (wheelFrame !== null) {
+    cancelAnimationFrame(wheelFrame);
+    wheelFrame = null;
+  }
+  const { vertical, delta, x, y } = pendingWheel;
+  pendingWheel.delta = 0;
+  if (delta === 0 || props.sessionId === null) return;
+  sendInput(wheelPacket(props.sessionId, vertical, delta, x, y));
 }
 
 function sendCtrlAltDel() {
@@ -441,19 +781,26 @@ defineExpose({
 </script>
 
 <template>
-  <div ref="stage" class="rdp-stage" @pointerdown="focusInput">
-    <canvas
-      ref="canvas"
-      class="rdp-canvas"
-      :class="{ 'rdp-canvas--focused': focused }"
-      :style="canvasStyle"
-      tabindex="0"
-      @mousemove="onMouseMove"
-      @mousedown="onMouseDown"
-      @mouseup="onMouseUp"
-      @wheel.prevent="onWheel"
-      @contextmenu.prevent
-    />
+  <div
+    ref="stage"
+    class="rdp-stage"
+    :class="{ 'rdp-stage--manual': manualZoom }"
+    @pointerdown="onStagePointerDown"
+    @contextmenu="onContextMenu"
+  >
+    <div class="rdp-scroll">
+      <canvas
+        ref="canvas"
+        class="rdp-canvas"
+        :style="canvasStyle"
+        tabindex="0"
+        @mousemove="onMouseMove"
+        @mousedown="onMouseDown"
+        @mouseup="onMouseUp"
+        @wheel.prevent="onWheel"
+        @contextmenu="onContextMenu"
+      />
+    </div>
     <textarea
       ref="inputSink"
       class="rdp-input-sink"
@@ -466,6 +813,7 @@ defineExpose({
       @blur="onBlur"
       @keydown="onKeyDown"
       @keyup="onKeyUp"
+      @paste="onPaste"
       @compositionend="onCompositionEnd"
     />
   </div>
@@ -484,20 +832,46 @@ defineExpose({
   overflow: hidden;
   background: #000;
   outline: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.rdp-stage--manual {
+  display: block;
+  overflow: auto;
+}
+
+.rdp-scroll {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.rdp-stage--manual .rdp-scroll {
+  width: max-content;
+  height: max-content;
 }
 
 .rdp-canvas {
   display: block;
+  flex: 0 0 auto;
   max-width: 100%;
   max-height: 100%;
   background: #000;
   outline: none;
   image-rendering: auto;
   cursor: default;
+  touch-action: none;
+  -webkit-user-drag: none;
 }
 
-.rdp-canvas--focused {
-  cursor: none;
+.rdp-stage--manual .rdp-canvas {
+  max-width: none;
+  max-height: none;
 }
 
 .rdp-input-sink {
@@ -513,5 +887,8 @@ defineExpose({
   background: transparent;
   color: transparent;
   caret-color: transparent;
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 </style>

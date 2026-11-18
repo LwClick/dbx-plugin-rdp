@@ -3,16 +3,16 @@
   "manifest_version": 1,
   "id": "io.github.lwclick.rdp",
   "name": "DBX RDP",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "publisher": "lwclick",
   "description": "Remote Windows desktops over RDP inside DBX.",
   "icon": "assets/plugin.svg",
   "source": "https://github.com/LwClick/dbx-plugin-rdp",
   "engines": {
-    "dbx": ">=0.6.51",
-    "host_api": "^1.0"
+    "dbx": ">=0.6.52",
+    "host_api": "^1.3"
   },
-  "permissions": ["host.binary", "host.events", "host.clipboard:read", "host.storage"],
+  "permissions": ["host.binary", "host.events", "host.workbench", "host.clipboard:read", "host.storage"],
   "entrypoints": {
     "backend": {
       "protocol_versions": [1],
@@ -31,7 +31,7 @@
       "label": "RDP connection",
       "icon": "assets/connection.svg",
       "database_type": "rdp",
-      "description": "Connect to a Windows Remote Desktop server.",
+      "description": "Connect to a Windows Remote Desktop server. After saving, open the connection from the left sidebar to start the desktop.",
       "fields": [
         {
           "key": "display_name",
@@ -58,6 +58,21 @@
           "required": true
         },
         {
+          "key": "resolution",
+          "label": "Desktop resolution",
+          "type": "select",
+          "default": "1920x1080",
+          "binding": "config",
+          "description": "Fixed keeps a standard Windows desktop size and scales it to the workbench. Fit asks the server to follow the workbench size.",
+          "options": [
+            { "label": "1920 × 1080 (recommended)", "value": "1920x1080" },
+            { "label": "1280 × 720", "value": "1280x720" },
+            { "label": "2560 × 1440", "value": "2560x1440" },
+            { "label": "3840 × 2160", "value": "3840x2160" },
+            { "label": "Fit workbench", "value": "fit" }
+          ]
+        },
+        {
           "key": "username",
           "label": "Username",
           "type": "text",
@@ -78,6 +93,33 @@
           "type": "text",
           "binding": "config",
           "description": "Optional NetBIOS domain when the username does not include it."
+        },
+        {
+          "key": "remap_macos_shortcuts",
+          "label": "Remap macOS shortcuts",
+          "type": "boolean",
+          "default": true,
+          "binding": "config",
+          "description": "Map Cmd+C/X/A/Z/S/F and similar shortcuts to their Windows Ctrl equivalents."
+        },
+        {
+          "key": "keyboard_layout",
+          "label": "Keyboard layout",
+          "type": "select",
+          "default": "auto",
+          "binding": "config",
+          "description": "Layout announced to Windows. Physical key positions are always sent; choose a matching layout when typing symbols incorrectly.",
+          "options": [
+            { "label": "Automatic", "value": "auto" },
+            { "label": "English (US)", "value": "en-US" },
+            { "label": "Chinese (Simplified)", "value": "zh-CN" },
+            { "label": "Japanese", "value": "ja-JP" },
+            { "label": "German", "value": "de-DE" },
+            { "label": "French", "value": "fr-FR" },
+            { "label": "Spanish", "value": "es-ES" },
+            { "label": "Russian", "value": "ru-RU" },
+            { "label": "Portuguese (Brazil)", "value": "pt-BR" }
+          ]
         },
         {
           "key": "ask_password",
@@ -117,6 +159,32 @@
           "binding": "config"
         },
         {
+          "key": "share_local_folder",
+          "label": "Share a local folder",
+          "type": "boolean",
+          "default": false,
+          "binding": "config",
+          "description": "Redirect a folder to the remote session as \\\\tsclient\\DBX RDP. Off by default."
+        },
+        {
+          "key": "shared_folder_path",
+          "label": "Shared folder path",
+          "type": "text",
+          "binding": "config",
+          "placeholder": "/Users/you/Shared",
+          "description": "Optional absolute path. Leave empty to use the plugin data directory.",
+          "picker": { "kind": "directory" },
+          "visible_when": { "field": "share_local_folder", "one_of": [true] }
+        },
+        {
+          "key": "audio_playback",
+          "label": "Redirect audio",
+          "type": "boolean",
+          "default": true,
+          "binding": "config",
+          "description": "Play remote audio on this computer. Linux builds currently ignore this setting."
+        },
+        {
           "key": "performance_profile",
           "label": "Performance profile",
           "type": "select",
@@ -126,6 +194,18 @@
             { "label": "Balanced", "value": "balanced" },
             { "label": "Quality", "value": "quality" },
             { "label": "Speed", "value": "speed" }
+          ]
+        },
+        {
+          "key": "image_quality",
+          "label": "Image quality",
+          "type": "select",
+          "default": "lossless",
+          "binding": "config",
+          "description": "Lossless disables RDP lossy bitmap compression for sharper text and images. Balanced reduces bandwidth on slow links.",
+          "options": [
+            { "label": "Lossless (sharpest, more bandwidth)", "value": "lossless" },
+            { "label": "Balanced (lossy, smaller bandwidth)", "value": "balanced" }
           ]
         },
         {
@@ -164,19 +244,70 @@
       "contributions": {
         "io.github.lwclick.rdp.connection": {
           "label": "RDP 连接",
-          "description": "连接 Windows 远程桌面服务器。",
+          "description": "连接 Windows 远程桌面服务器。保存后请从左侧连接列表打开以启动桌面。",
           "fields": {
             "display_name": { "label": "连接名称" },
             "host": { "label": "主机" },
             "port": { "label": "端口" },
+            "resolution": {
+              "label": "桌面分辨率",
+              "description": "固定模式保持标准 Windows 桌面尺寸并按比例缩放到工作台；自适应模式由服务器跟随工作台尺寸。",
+              "options": {
+                "1920x1080": "1920 × 1080（推荐）",
+                "1280x720": "1280 × 720",
+                "2560x1440": "2560 × 1440",
+                "3840x2160": "3840 × 2160",
+                "fit": "自适应工作台"
+              }
+            },
             "username": { "label": "用户名", "placeholder": "DOMAIN\\user 或 user@domain" },
             "password": { "label": "密码", "description": "由 DBX Secret Store 加密保存；留空则每次连接时询问。" },
             "domain": { "label": "域", "description": "用户名未包含域时可填写 NetBIOS 域。" },
+            "remap_macos_shortcuts": {
+              "label": "映射 macOS 快捷键",
+              "description": "把 Cmd+C/X/A/Z/S/F 等映射为 Windows 的 Ctrl 快捷键。"
+            },
+            "keyboard_layout": {
+              "label": "键盘布局",
+              "description": "告知 Windows 使用的键盘布局；始终发送物理键位，符号输入不正确时选择匹配布局。",
+              "options": {
+                "auto": "自动",
+                "en-US": "英语（美国）",
+                "zh-CN": "中文（简体）",
+                "ja-JP": "日语",
+                "de-DE": "德语",
+                "fr-FR": "法语",
+                "es-ES": "西班牙语",
+                "ru-RU": "俄语",
+                "pt-BR": "葡萄牙语（巴西）"
+              }
+            },
             "ask_password": { "label": "每次连接都询问密码", "description": "忽略已保存密码，每次连接重新输入。" },
             "security_mode": { "label": "安全模式", "options": { "nla": "NLA（推荐）", "tls": "TLS（旧服务器）" } },
             "certificate_policy": { "label": "服务器证书", "options": { "prompt": "提示并固定不受信任证书", "strict": "严格（仅信任系统根证书）" } },
             "clipboard_sync": { "label": "文本剪贴板同步" },
+            "share_local_folder": {
+              "label": "共享本地文件夹",
+              "description": "把本地目录映射为远程会话中的 \\\\tsclient\\DBX RDP，默认关闭。"
+            },
+            "shared_folder_path": {
+              "label": "共享文件夹路径",
+              "placeholder": "/Users/you/Shared",
+              "description": "可选绝对路径；留空则使用插件数据目录。"
+            },
+            "audio_playback": {
+              "label": "音频重定向",
+              "description": "在本机播放远程音频；Linux 构建暂不支持该设置。"
+            },
             "performance_profile": { "label": "性能模式", "options": { "balanced": "平衡", "quality": "质量", "speed": "速度" } },
+            "image_quality": {
+              "label": "图像质量",
+              "description": "无损模式关闭 RDP 有损位图压缩，文字和图片更清晰；带宽不足时可切换为平衡。",
+              "options": {
+                "lossless": "无损（最清晰，带宽更高）",
+                "balanced": "平衡（有损，带宽更小）"
+              }
+            },
             "connect_timeout_secs": { "label": "连接超时（秒）" }
           },
           "actions": {

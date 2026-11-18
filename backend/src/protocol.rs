@@ -6,13 +6,29 @@
 
 pub const FRAME_CHANNEL: &str = "rdp-frame-v1";
 pub const INPUT_CHANNEL: &str = "rdp-input-v1";
+pub const CURSOR_CHANNEL: &str = "rdp-cursor-v1";
+pub const CLIPBOARD_CHANNEL: &str = "rdp-clipboard-v1";
 
 pub const FRAME_MAGIC: u8 = 0xD1;
 pub const INPUT_MAGIC: u8 = 0xD2;
+pub const CURSOR_MAGIC: u8 = 0xD3;
+pub const CLIPBOARD_MAGIC: u8 = 0xC2;
 pub const PROTOCOL_VERSION: u8 = 1;
 
 pub const FRAME_HEADER_LEN: usize = 32;
 pub const INPUT_HEADER_LEN: usize = 8;
+pub const CURSOR_HEADER_LEN: usize = 16;
+pub const CLIPBOARD_HEADER_LEN: usize = 20;
+
+pub const CLIPBOARD_TYPE_IMAGE: u8 = 1;
+/// Clipboard image chunks are fixed-size so the receiver can reject gaps
+/// without buffering offset metadata from the sender.
+pub const CLIPBOARD_CHUNK_BYTES: usize = 1024 * 1024;
+pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+
+pub const CURSOR_KIND_DEFAULT: u8 = 0;
+pub const CURSOR_KIND_HIDDEN: u8 = 1;
+pub const CURSOR_KIND_BITMAP: u8 = 2;
 
 /// The host bridge rejects a single binary message above 8 MiB. Keep every
 /// chunk well below that, and row-aligned so the UI can blit it directly.
@@ -160,6 +176,60 @@ impl FrameHeader {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorHeader {
+    pub kind: u8,
+    pub session_id: u32,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl CursorHeader {
+    pub fn encode(self) -> [u8; CURSOR_HEADER_LEN] {
+        let mut out = [0u8; CURSOR_HEADER_LEN];
+        out[0] = CURSOR_MAGIC;
+        out[1] = PROTOCOL_VERSION;
+        out[2] = self.kind;
+        out[3] = 0;
+        out[4..8].copy_from_slice(&self.session_id.to_be_bytes());
+        out[8..10].copy_from_slice(&self.hotspot_x.to_be_bytes());
+        out[10..12].copy_from_slice(&self.hotspot_y.to_be_bytes());
+        out[12..14].copy_from_slice(&self.width.to_be_bytes());
+        out[14..16].copy_from_slice(&self.height.to_be_bytes());
+        out
+    }
+
+    #[cfg(test)]
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() != CURSOR_HEADER_LEN {
+            return Err(ProtocolError::Truncated);
+        }
+        if bytes[0] != CURSOR_MAGIC {
+            return Err(ProtocolError::BadMagic);
+        }
+        if bytes[1] != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion(bytes[1]));
+        }
+        let kind = bytes[2];
+        if !matches!(
+            kind,
+            CURSOR_KIND_DEFAULT | CURSOR_KIND_HIDDEN | CURSOR_KIND_BITMAP
+        ) {
+            return Err(ProtocolError::UnknownType(kind));
+        }
+        Ok(Self {
+            kind,
+            session_id: read_u32(&bytes[4..8]),
+            hotspot_x: read_u16(&bytes[8..10]),
+            hotspot_y: read_u16(&bytes[10..12]),
+            width: read_u16(&bytes[12..14]),
+            height: read_u16(&bytes[14..16]),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMessage {
     Key {
         code: u8,
@@ -295,6 +365,68 @@ pub fn chunk_rect(rect: Rect) -> Chunks {
     Chunks::new(rect)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipboardChunk<'a> {
+    pub session_id: u32,
+    pub token: u32,
+    pub chunk_index: u16,
+    pub chunk_count: u16,
+    pub total_len: u32,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_clipboard_chunk(bytes: &[u8]) -> Result<ClipboardChunk<'_>, ProtocolError> {
+    if bytes.len() < CLIPBOARD_HEADER_LEN {
+        return Err(ProtocolError::Truncated);
+    }
+    if bytes[0] != CLIPBOARD_MAGIC {
+        return Err(ProtocolError::BadMagic);
+    }
+    if bytes[1] != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedVersion(bytes[1]));
+    }
+    if bytes[2] != CLIPBOARD_TYPE_IMAGE {
+        return Err(ProtocolError::UnknownType(bytes[2]));
+    }
+    let token = read_u32(&bytes[4..8]);
+    let session_id = read_u32(&bytes[8..12]);
+    let chunk_index = read_u16(&bytes[12..14]);
+    let chunk_count = read_u16(&bytes[14..16]);
+    let total_len = read_u32(&bytes[16..20]);
+    if chunk_count == 0 || chunk_index >= chunk_count {
+        return Err(ProtocolError::InvalidPayload);
+    }
+    let total = usize::try_from(total_len).map_err(|_| ProtocolError::InvalidPayload)?;
+    if total == 0 || total > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(ProtocolError::InvalidPayload);
+    }
+    // Fixed-size chunks make the chunk count a function of the total length.
+    if usize::from(chunk_count) != total.div_ceil(CLIPBOARD_CHUNK_BYTES) {
+        return Err(ProtocolError::InvalidPayload);
+    }
+    let offset = usize::from(chunk_index)
+        .checked_mul(CLIPBOARD_CHUNK_BYTES)
+        .ok_or(ProtocolError::InvalidPayload)?;
+    if offset >= total {
+        return Err(ProtocolError::InvalidPayload);
+    }
+    let payload = &bytes[CLIPBOARD_HEADER_LEN..];
+    // Every chunk except the last must be full-size; this also guarantees that
+    // chunk_count matches the declared total and rules out overlapping gaps.
+    let expected = (total - offset).min(CLIPBOARD_CHUNK_BYTES);
+    if payload.len() != expected {
+        return Err(ProtocolError::InvalidPayload);
+    }
+    Ok(ClipboardChunk {
+        session_id,
+        token,
+        chunk_index,
+        chunk_count,
+        total_len,
+        payload,
+    })
+}
+
 pub struct Chunks {
     rect: Rect,
     rows_per_chunk: usize,
@@ -406,6 +538,38 @@ mod tests {
     }
 
     #[test]
+    fn cursor_header_round_trip() {
+        let header = CursorHeader {
+            kind: CURSOR_KIND_BITMAP,
+            session_id: 7,
+            hotspot_x: 3,
+            hotspot_y: 4,
+            width: 32,
+            height: 32,
+        };
+        let decoded = CursorHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn rejects_unknown_cursor_kind() {
+        let header = CursorHeader {
+            kind: CURSOR_KIND_DEFAULT,
+            session_id: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+        };
+        let mut bytes = header.encode();
+        bytes[2] = 9;
+        assert_eq!(
+            CursorHeader::decode(&bytes),
+            Err(ProtocolError::UnknownType(9))
+        );
+    }
+
+    #[test]
     fn rejects_bad_magic_and_version() {
         let header = FrameHeader {
             frame_type: FRAME_TYPE_BITMAP,
@@ -475,5 +639,57 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.extend_from_slice(&[1, 0]);
         assert_eq!(parse_input(&bytes), Err(ProtocolError::InvalidPayload));
+    }
+
+    fn clipboard_chunk(total: u32, index: u16, count: u16, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![CLIPBOARD_MAGIC, PROTOCOL_VERSION, CLIPBOARD_TYPE_IMAGE, 0];
+        bytes.extend_from_slice(&7u32.to_be_bytes());
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes.extend_from_slice(&index.to_be_bytes());
+        bytes.extend_from_slice(&count.to_be_bytes());
+        bytes.extend_from_slice(&total.to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn clipboard_chunk_round_trip() {
+        let bytes = clipboard_chunk(5, 0, 1, b"hello");
+        let chunk = parse_clipboard_chunk(&bytes).expect("parse");
+        assert_eq!(chunk.session_id, 3);
+        assert_eq!(chunk.token, 7);
+        assert_eq!(chunk.total_len, 5);
+        assert_eq!(chunk.payload, b"hello");
+    }
+
+    #[test]
+    fn clipboard_chunk_rejects_gaps_and_oversize() {
+        // Non-last chunks must be full-size.
+        let short = clipboard_chunk(CLIPBOARD_CHUNK_BYTES as u32 + 1, 0, 2, b"short");
+        assert_eq!(
+            parse_clipboard_chunk(&short),
+            Err(ProtocolError::InvalidPayload)
+        );
+        // The declared total must fit the advertised chunk count.
+        let truncated = clipboard_chunk(4, 0, 2, b"abcd");
+        assert_eq!(
+            parse_clipboard_chunk(&truncated),
+            Err(ProtocolError::InvalidPayload)
+        );
+        let oversize = clipboard_chunk(
+            (MAX_CLIPBOARD_IMAGE_BYTES + 1) as u32,
+            0,
+            1,
+            b"not-the-real-size",
+        );
+        assert_eq!(
+            parse_clipboard_chunk(&oversize),
+            Err(ProtocolError::InvalidPayload)
+        );
+        let zero = clipboard_chunk(0, 0, 1, b"");
+        assert_eq!(
+            parse_clipboard_chunk(&zero),
+            Err(ProtocolError::InvalidPayload)
+        );
     }
 }

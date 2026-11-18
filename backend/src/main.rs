@@ -1,6 +1,8 @@
 mod cert;
 mod clipboard;
 mod credentials;
+mod drives;
+mod files;
 mod plugin;
 mod protocol;
 mod session;

@@ -51,16 +51,31 @@ export function parseFrameHeader(data: Uint8Array): FrameHeader {
   };
 }
 
-export function chunkRows(header: FrameHeader): number {
-  return Math.max(0, header.height - header.rowStart);
-}
-
-export function expectedChunkBytes(header: FrameHeader): number {
-  return header.width * chunkRows(header) * 4;
+/**
+ * Derives the row count of one bitmap chunk from its payload. The wire header
+ * only carries `rowStart`, not the chunk's row count, and every chunk except
+ * the last is shorter than the remaining rectangle height.
+ */
+export function chunkRowCount(header: FrameHeader, payloadLength: number): number {
+  const rowBytes = header.width * 4;
+  if (rowBytes <= 0 || payloadLength <= 0 || payloadLength % rowBytes !== 0) {
+    throw new FrameProtocolError(`RDP chunk payload is not row-aligned (${payloadLength} bytes)`);
+  }
+  const rows = payloadLength / rowBytes;
+  if (header.rowStart + rows > header.height) {
+    throw new FrameProtocolError(
+      `RDP chunk rows ${rows} exceed rect height ${header.height} at row ${header.rowStart}`,
+    );
+  }
+  return rows;
 }
 
 export function isFullDesktopFrame(header: FrameHeader): boolean {
   return header.x === 0 && header.y === 0 && header.width === header.desktopWidth && header.height === header.desktopHeight;
+}
+
+export function frameMatchesSurface(header: FrameHeader, width: number, height: number): boolean {
+  return header.desktopWidth === width && header.desktopHeight === height;
 }
 
 export interface FrameFragment {
@@ -72,9 +87,9 @@ export function splitFrame(data: Uint8Array): FrameFragment {
   const header = parseFrameHeader(data);
   const payload = data.subarray(FRAME_HEADER_LEN);
   if (header.frameType === FRAME_TYPE_BITMAP) {
-    const expected = expectedChunkBytes(header);
-    if (payload.length !== expected) {
-      throw new FrameProtocolError(`RDP frame payload is ${payload.length} bytes, expected ${expected}`);
+    const rows = chunkRowCount(header, payload.length);
+    if (rows === 0 || header.chunkCount === 0) {
+      throw new FrameProtocolError("RDP bitmap frame has no rows");
     }
   }
   return { header, payload };

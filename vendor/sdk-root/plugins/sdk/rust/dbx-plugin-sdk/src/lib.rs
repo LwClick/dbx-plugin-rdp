@@ -713,7 +713,7 @@ impl<H: PluginHandler> PluginServer<H> {
         &self,
         payload: Vec<u8>,
         emitter: PluginEmitter,
-        workers: &WorkerPool,
+        _workers: &WorkerPool,
     ) -> Result<(), String> {
         if payload.len() < 2 {
             return Err("invalid binary frame".to_string());
@@ -727,12 +727,15 @@ impl<H: PluginHandler> PluginServer<H> {
             .to_string();
         validate_protocol_name(&channel).map_err(|error| error.message)?;
         let data = payload[2 + channel_len..].to_vec();
-        let handler = self.handler.clone();
-        workers.submit(move || {
-            if let Err(error) = handler.handle_binary(&channel, data, &emitter) {
-                eprintln!("[dbx-plugin-sdk] binary handler failed: {}", error.message);
-            }
-        })
+        // Binary frames carry ordered input (keyboard, mouse, wheel) and image
+        // chunks. Dispatching them through the worker pool lets two frames run
+        // concurrently and reorders keydown/keyup under load. Handle them on
+        // the reader thread instead; binary handlers must stay fast because
+        // they briefly block JSON dispatch.
+        if let Err(error) = self.handler.handle_binary(&channel, data, &emitter) {
+            eprintln!("[dbx-plugin-sdk] binary handler failed: {}", error.message);
+        }
+        Ok(())
     }
 }
 

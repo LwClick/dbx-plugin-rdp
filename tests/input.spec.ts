@@ -15,8 +15,8 @@ import {
   rdpButton,
   releaseAllPacket,
   unicodePacket,
-  wheelDelta,
   wheelPacket,
+  wheelUnits,
 } from "../src/input";
 
 function view(data: Uint8Array): DataView {
@@ -56,11 +56,20 @@ describe("input protocol", () => {
     expect(rdpButton(9)).toBeNull();
   });
 
-  it("inverts wheel direction and clamps to one notch", () => {
-    expect(wheelDelta(120)).toEqual({ vertical: true, delta: -120 });
-    expect(wheelDelta(-240)).toEqual({ vertical: true, delta: 120 });
-    expect(wheelDelta(0, 120)).toEqual({ vertical: false, delta: -120 });
-    expect(wheelDelta(0)).toEqual({ vertical: true, delta: 0 });
+  it("maps wheel deltas by delta mode and axis", () => {
+    // Pixel deltas keep their magnitude so trackpads scroll smoothly.
+    expect(wheelUnits(100)).toEqual({ vertical: true, delta: -100 });
+    expect(wheelUnits(-240)).toEqual({ vertical: true, delta: 240 });
+    // Lines and pages map to classic notches.
+    expect(wheelUnits(3, 0, 1)).toEqual({ vertical: true, delta: -360 });
+    expect(wheelUnits(-1, 0, 2)).toEqual({ vertical: true, delta: 360 });
+    // The dominant axis wins; positive pixels scroll down (negative RDP units).
+    expect(wheelUnits(0, 120)).toEqual({ vertical: false, delta: -120 });
+    expect(wheelUnits(-10, 4)).toEqual({ vertical: true, delta: 10 });
+    // Pixel deltas are clamped to a sane packet size.
+    expect(wheelUnits(1000).delta).toBe(-255);
+    expect(wheelUnits(-1000).delta).toBe(255);
+    expect(wheelUnits(0)).toEqual({ vertical: true, delta: 0 });
   });
 
   it("encodes wheel packets", () => {
